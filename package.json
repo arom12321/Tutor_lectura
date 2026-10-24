@@ -1,0 +1,1 @@
+{"name":"lectura-bloom","private":true,"type":"module","scripts":{"dev":"node server/dev.js","start":"node --env-file-if-exists=.env server/index.js","build":"npm --prefix frontend run build","test":"node --test server/*.test.js"}}
