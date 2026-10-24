@@ -2,9 +2,10 @@ import http from 'node:http'
 import { readFile, stat } from 'node:fs/promises'
 import { resolve, extname, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { stories } from '../shared/stories.js'
+import { levels, stories } from '../shared/stories.js'
 const root=fileURLToPath(new URL('../frontend/dist/',import.meta.url))
 const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.ico':'image/x-icon'}
+const normalize=value=>value.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()
 export function createApp({apiKey=process.env.OPENROUTER_API_KEY, model=process.env.OPENROUTER_MODEL||'openrouter/free', fetchImpl=fetch}={}) {
  if(model!=='openrouter/free'&&!model.endsWith(':free'))throw new Error('Elige openrouter/free o un modelo terminado en :free.')
  const clients=new Map()
@@ -21,9 +22,10 @@ export function createApp({apiKey=process.env.OPENROUTER_API_KEY, model=process.
    let raw='',size=0
    try{for await(const chunk of req){size+=chunk.length;if(size>2048){json(413,{error:'Solicitud demasiado grande.'});return}raw+=chunk} }catch{return json(400,{error:'Solicitud incompleta.'})}
    let body;try{body=JSON.parse(raw)}catch{return json(400,{error:'JSON inválido.'})}
-   const story=stories.find(s=>s.id===body?.storyId),index=body?.questionIndex
+   const story=stories.find(s=>s.id===body?.storyId),index=body?.questionIndex,selectedAnswer=body?.selectedAnswer
    if(!story||!Number.isInteger(index)||index<0||index>=story.questions.length)return json(400,{error:'Cuento o pregunta inválidos.'})
    const question=story.questions[index]
+   if(selectedAnswer!=null&&(!Number.isInteger(selectedAnswer)||selectedAnswer<0||selectedAnswer>=question.options.length))return json(400,{error:'Respuesta elegida inválida.'})
    const local=(reason)=>json(200,{hint:question.hint,source:'local',reason})
    if(!apiKey)return local('not_configured')
    const now=Date.now(),ip=req.socket.remoteAddress
@@ -31,10 +33,15 @@ export function createApp({apiKey=process.env.OPENROUTER_API_KEY, model=process.
    const bucket=clients.get(ip)||{start:now,count:0};clients.set(ip,bucket)
    if(++bucket.count>12)return local('rate_limit')
    try{
-    const upstream=await fetchImpl('https://openrouter.ai/api/v1/chat/completions',{method:'POST',headers:{Authorization:`Bearer ${apiKey}`,'Content-Type':'application/json','X-Title':'Bloom lectura'},signal:AbortSignal.timeout(8000),body:JSON.stringify({model,max_tokens:180,temperature:0.3,messages:[{role:'system',content:'Eres Oli, tutor de comprensión lectora para niños de 6 a 9 años. Responde SOLO con una pista cálida en español, de máximo dos frases cortas. No reveles la respuesta ni indiques una opción. Invita a volver a una parte concreta del cuento. No solicites datos personales ni sugieras enlaces o conversaciones externas. Usa exclusivamente el cuento proporcionado.'},{role:'user',content:JSON.stringify({cuento:story.text.join('\n'),pregunta:question.text,pistaBase:question.hint})}]})})
-    if(!upstream.ok)return local('provider_unavailable')
+    const level=levels.find(item=>item.id===story.level)
+    const upstream=await fetchImpl('https://openrouter.ai/api/v1/chat/completions',{method:'POST',headers:{Authorization:`Bearer ${apiKey}`,'Content-Type':'application/json','X-Title':'Bloom lectura'},signal:AbortSignal.timeout(8000),body:JSON.stringify({model,max_tokens:300,reasoning_effort:'none',temperature:0,seed:42,messages:[{role:'system',content:'Eres Oli, tutor de comprensión lectora para niños de 6 a 9 años. Tu única tarea es reformular la pistaBase como una pista cálida y concreta, no resolver la pregunta. Usa una o dos frases cortas con vocabulario apropiado para el nivel. Empieza con «Vuelve», «Busca», «Piensa» o «Recuerda». Si hay una respuesta elegida, orienta la confusión sin juzgarla. No reveles la respuesta correcta, no copies ninguna opción y no indiques letras ni números de opción. No añadas hechos que no estén en pistaBase, no solicites datos personales y no sugieras enlaces o conversaciones externas.'},{role:'user',content:JSON.stringify({nivel:`${level.name} (${level.age})`,cuento:story.text.join('\n'),pregunta:question.text,respuestaElegida:selectedAnswer==null?undefined:question.options[selectedAnswer],pistaBase:question.hint})}]})})
+    if(!upstream.ok)return local(`provider_${upstream.status}`)
     const data=await upstream.json(),hint=data?.choices?.[0]?.message?.content?.trim()
-    if(!hint||hint.length>600||/https?:\/\//i.test(hint))return local('invalid_response')
+    if(!hint)return local('empty_response')
+    if(hint.length>600)return local('response_too_long')
+    if(/https?:\/\//i.test(hint))return local('external_link')
+    const normalizedHint=normalize(hint),normalizedAnswer=normalize(question.options[question.answer])
+    if((normalizedAnswer.length>=3&&normalizedHint.includes(normalizedAnswer))||/\b(?:opcion|respuesta)\s+(?:correcta\s+)?(?:es\s+)?[abc123]\b/.test(normalizedHint))return local('answer_leak')
     return json(200,{hint,source:'ai'})
    }catch{return local('provider_unavailable')}
   }
@@ -52,5 +59,6 @@ export function createApp({apiKey=process.env.OPENROUTER_API_KEY, model=process.
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  const port=Number(process.env.PORT)||3001
- createApp().listen(port,'127.0.0.1',()=>console.log(`Bloom disponible en http://localhost:${port}`))
+ const host=process.env.HOST||'0.0.0.0'
+ createApp().listen(port,host,()=>console.log(`Bloom disponible en http://localhost:${port}`))
 }

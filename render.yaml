@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: bloom-tutor-lectura
+    runtime: node
+    plan: free
+    buildCommand: npm --prefix frontend ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: openrouter/free
